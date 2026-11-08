@@ -967,6 +967,31 @@ static void *ring_alloc(Ring *rg, VkDeviceSize n, VkDeviceSize align,
 /* Samples for the next image_create; set around the multisampled ones. */
 static uint32_t s_img_samples = 1;
 
+/* The mip levels a w x h image can have, down to 1x1. A title's format
+ * register may name more (RSC2: 11 for a 512x512 texture); the NV2A takes
+ * that, Vulkan forbids it, and Metal under MoltenVK aborts on it. */
+static uint32_t mip_max(uint32_t w, uint32_t h)
+{
+    uint32_t m = w > h ? w : h, n = 1;
+    while (m > 1) {
+        m >>= 1;
+        n++;
+    }
+    return n;
+}
+
+/* levels for a w x h texture, capped at what the size allows. */
+static uint32_t mip_clamp(uint32_t levels, uint32_t w, uint32_t h)
+{
+    static int shown;
+    uint32_t m = mip_max(w, h);
+    if (levels <= m)
+        return levels;
+    if (shown++ < 5)
+        fprintf(stderr, "  [VK] %ux%u texture asks for %u mip levels; %u used\n", w, h, levels, m);
+    return m;
+}
+
 static int image_create(uint32_t w, uint32_t h, uint32_t levels, uint32_t layers,
                         VkFormat fmt, VkImageUsageFlags usage, int cube,
                         VkImageAspectFlags aspect, VkImage *img,
@@ -4032,6 +4057,7 @@ static int tex_get(const Nv2aVkTex *t, VkImageView *view, uint32_t *levels_out)
         }
         w0 = d.width >> d.min_level ? d.width >> d.min_level : 1;
         h0 = d.height >> d.min_level ? d.height >> d.min_level : 1;
+        levels = mip_clamp(levels, w0, h0);
         total = 0;
         for (lv = 0; lv < levels; lv++) {
             uint32_t lw = w0 >> lv ? w0 >> lv : 1, lh = h0 >> lv ? h0 >> lv : 1;
@@ -4084,6 +4110,7 @@ static int tex_get(const Nv2aVkTex *t, VkImageView *view, uint32_t *levels_out)
     h0 = d.size_from_format ? (d.height >> d.min_level) : d.height;
     if (!w0) w0 = 1;
     if (!h0) h0 = 1;
+    levels = mip_clamp(levels, w0, h0);
     for (lv = 0; lv < levels; lv++) {
         uint32_t lw = w0 >> lv ? w0 >> lv : 1, lh = h0 >> lv ? h0 >> lv : 1;
         total += (VkDeviceSize)lw * lh * 4 * faces;
