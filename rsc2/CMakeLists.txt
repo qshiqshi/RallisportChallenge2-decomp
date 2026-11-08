@@ -136,6 +136,14 @@ if(WIN32)
     set_source_files_properties(src/host_coro.c PROPERTIES HEADER_FILE_ONLY ON)
 endif()
 
+# macOS: the launcher asks AppKit where the pointer is (src/mac_mouse.m).
+if(APPLE)
+    enable_language(OBJC)
+    target_sources(${PROJECT_NAME} PRIVATE src/mac_mouse.m)
+    set_source_files_properties(src/mac_mouse.m PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(${PROJECT_NAME} PRIVATE "-framework AppKit")
+endif()
+
 # Link against the xboxrecomp umbrella target (all 6 runtime libraries)
 target_link_libraries(${PROJECT_NAME} PRIVATE xboxrecomp)
 

@@ -1448,6 +1448,42 @@ static int launcher_window(void)
             continue;
         }
         do {
+#if defined(__APPLE__)
+            if (ev.type == SDL_MOUSEMOTION || ev.type == SDL_MOUSEBUTTONDOWN
+                    || ev.type == SDL_MOUSEBUTTONUP) {
+                /* The pointer as AppKit has it (mac_mouse.m): SDL's motion
+                 * positions can be off on macOS 26 and later. */
+                extern int rsc2_mac_mouse(SDL_Window *win, float *x, float *y);
+                float mx, my;
+                if (rsc2_mac_mouse(win, &mx, &my)) {
+                    if (getenv("RSC2_LAUNCHER_MOUSE_LOG"))
+                        fprintf(stderr, "[LAUNCHER] SDL %d,%d  AppKit %.0f,%.0f\n",
+                                ev.type == SDL_MOUSEMOTION ? ev.motion.x : ev.button.x,
+                                ev.type == SDL_MOUSEMOTION ? ev.motion.y : ev.button.y, mx, my);
+                    if (ev.type == SDL_MOUSEMOTION) {
+                        ev.motion.x = (Sint32)mx;
+                        ev.motion.y = (Sint32)my;
+                    } else {
+                        ev.button.x = (Sint32)mx;
+                        ev.button.y = (Sint32)my;
+                    }
+                }
+            }
+#endif
+            if ((ev.type == SDL_MOUSEMOTION || ev.type == SDL_MOUSEBUTTONDOWN)
+                    && getenv("RSC2_LAUNCHER_MOUSE_LOG")) {
+                /* Where the pointer is, in window points, layout units and
+                 * pixels, and what it hits: for checking hover on a new host. */
+                int lw, lh, lo, lp;
+                float x = ev.type == SDL_MOUSEMOTION ? ev.motion.x : ev.button.x;
+                float y = ev.type == SDL_MOUSEMOTION ? ev.motion.y : ev.button.y;
+                SDL_GetWindowSize(win, &lw, &lh);
+                SDL_GetRendererOutputSize(s_ren, &lo, &lp);
+                fprintf(stderr, "[LAUNCHER] mouse %.0f,%.0f pt -> %.1f,%.1f units -> hit %d"
+                        " (window %dx%d pt, output %dx%d px, fit %.3f, px/unit %.3f)\n",
+                        x, y, x / s_fit, y / s_fit, hit(x / s_fit, y / s_fit),
+                        lw, lh, lo, lp, s_fit, s_px);
+            }
             unfit_event(&ev);
             if (s_page && ev.type != SDL_QUIT && ev.type != SDL_CONTROLLERDEVICEADDED) {
                 keys_event(&ev);
