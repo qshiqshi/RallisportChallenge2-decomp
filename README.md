@@ -85,6 +85,30 @@ variable set by hand overrides the saved setting.
 [`rsc2/RUNNING.md`](rsc2/RUNNING.md) has the keyboard map, the Windows
 cross-build and more of the runtime switches.
 
+## Building (macOS, Apple silicon)
+
+A native arm64 build: no Rosetta, no emulator. The host side is verified on
+an M1 Max without the game (launcher, game window, Vulkan through MoltenVK,
+trapped device registers, lifted code against reference C). A run with the
+game itself is still to come. Details and the Mac specifics are in
+[`rsc2/RUNNING.md`](rsc2/RUNNING.md#macos-apple-silicon).
+
+```sh
+brew install cmake ninja python@3.13 sdl2 molten-vk vulkan-loader \
+             vulkan-headers shaderc glslang spirv-tools libepoxy
+python3.13 -m venv .venv
+.venv/bin/pip install capstone pefile numpy pytest
+cp RalliSport2/default.xbe xboxrecomp/game_files/default.xbe
+rsc2/regen.sh
+cmake -S rsc2 -B rsc2/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+ninja -C rsc2/build
+ln -s ../../RalliSport2 rsc2/build/game
+rsc2/run.sh
+```
+
+Every region's disc should do: redump.org lists one image for Europe, Japan
+and the USA (disc 22026, serial MS-057, the Classics edition included).
+
 ## Credits and licences
 
 - xboxrecomp by sp00nz and contributors — MIT (`xboxrecomp/LICENSE`).

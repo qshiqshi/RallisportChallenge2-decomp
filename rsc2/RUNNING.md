@@ -257,6 +257,51 @@ thread at a time, as on the Xbox's single CPU. With the lock on, the x86
 build plays the same replay through to the race no slower. `RECOMP_GUEST_LOCK=0`
 turns it off.
 
+## macOS (Apple silicon)
+
+Native arm64, built with Apple clang against Homebrew's SDL2 (sdl2-compat),
+Vulkan loader, MoltenVK, glslang, shaderc and libepoxy. The build steps are
+in the README. What differs from Linux, and why:
+
+- **Main thread.** AppKit wants every window and event on the main thread.
+  `main()` shows the launcher there, then runs the game on a thread of its
+  own (64 MB of stack, `xbox_HostRunGame`) and keeps the main thread for the
+  game window, which opens when the game asks for it.
+- **16 KB pages.** Apple silicon protects memory in 16 KB pages, the Xbox in
+  4 KB ones. The NV2A interrupt model traps the whole host page and serves
+  the neighbours of its registers (PBUS, PFIFO, ...) from a backing store;
+  the guest's protection changes are rounded to host pages without making
+  memory outside the range stricter.
+- **Faults.** Device registers fault and are decoded as AArch64 loads and
+  stores, as on Linux ARM; the register state comes from Darwin's thread,
+  NEON and exception state.
+- **Memory ordering.** ARM reorders what x86 keeps in order, so the ARM
+  default `RECOMP_GUEST_LOCK=1` (one guest thread at a time) applies here.
+- **Vulkan.** MoltenVK is a portability driver: the instance enumerates it
+  and the device enables `VK_KHR_portability_subset`. Metal samplers have
+  no LOD bias, so the title's bias is dropped.
+- Settings stay in `~/.config/rsc2`, the shader cache in
+  `~/.cache/xboxrecomp`. `kill -QUIT <pid>` still dumps every thread.
+
+Without the game:
+
+```sh
+# the host side: launcher, window, MoltenVK, device registers
+cmake -S rsc2 -B rsc2/build-smoke -G Ninja -DCMAKE_BUILD_TYPE=Release -DRSC2_SMOKE=ON
+ninja -C rsc2/build-smoke
+mkdir -p rsc2/build-smoke/game
+.venv/bin/python xboxrecomp/tools/conformance/mkxbe.py rsc2/build-smoke/game/default.xbe
+cd rsc2/build-smoke
+RECOMP_FB_WINDOW=0 RSC2_SMOKE_MMIO=1 ./rsc2 --no-launcher   # MMIO through the fault path: PASS
+RSC2_SMOKE_FRAMES=600 ./rsc2 --no-launcher                  # a window of GPU-cleared frames
+cd -
+# the lifted code: synthetic XBE -> C -> arm64, against the same functions in C
+rsc2/tools/macos/check_lifter.sh
+# the memory model on 16 KB pages
+cmake -S xboxrecomp/tests/memory_layout_posix -B /tmp/mlp -G Ninja && ninja -C /tmp/mlp
+/tmp/mlp/memory_layout_posix_test rsc2/build-smoke/game/default.xbe
+```
+
 ## Useful switches (environment variables)
 
 Defaults are baked into `src/main.c`; `NAME=0` turns one off.
