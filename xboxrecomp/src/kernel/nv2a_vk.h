@@ -146,6 +146,9 @@ void nv2a_vk_report_get(uint32_t va, uint64_t stamp);
  * nv2a_vk_flush). Does nothing until the window thread has handed over a
  * surface with nv2a_vk_set_surface. */
 void nv2a_vk_present(uint32_t va, uint32_t pitch);
+/* Save the next frame the window shows to `path` (.png where the host has
+ * a PNG encoder, else the same name with .bmp). 0 when nothing presents. */
+int  nv2a_vk_screenshot(const char *path);
 
 /* After nv2a_vk_flush and the flip pacing: hand the frame to the screen. */
 void nv2a_vk_present_queued(void);

@@ -579,6 +579,8 @@ void xbox_FramebufferWindowStart(void)
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <sys/stat.h>               /* mkdir: the screenshot folder */
+#include <time.h>
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
@@ -791,6 +793,32 @@ extern int  touchpad_enabled(void);
 extern void touchpad_finger(int kind, int64_t id, float x, float y);
 extern void touchpad_set_view(int w, int h);
 
+/* A screenshot of what the window shows, into ~/Pictures/RalliSport
+ * Challenge 2 (a controller's capture button, or F12). */
+static void fb_screenshot(void)
+{
+    extern int nv2a_vk_screenshot(const char *path);
+    char dir[1024], path[1200];
+    const char *home = getenv("HOME");
+    time_t t = time(NULL);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    snprintf(dir, sizeof dir, "%s/Pictures", home && *home ? home : ".");
+    mkdir(dir, 0755);
+    snprintf(dir, sizeof dir, "%s/Pictures/RalliSport Challenge 2", home && *home ? home : ".");
+    mkdir(dir, 0755);
+    snprintf(path, sizeof path, "%s/RSC2 %04d-%02d-%02d at %02d.%02d.%02d.png", dir,
+             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    if (s_vk_sdl && nv2a_vk_screenshot(path)) {
+        fprintf(stderr, "  [SHOT] %s\n", path);
+        return;
+    }
+    /* The SDL renderer's window: the frame as a BMP. */
+    snprintf(path + strlen(path) - 4, 5, ".bmp");
+    if (xbox_FramebufferDumpBmp(path))
+        fprintf(stderr, "  [SHOT] %s\n", path);
+}
+
 /* One round of window events; returns the window's new drawable size
  * through *resized when it changed. */
 static void fb_events(SDL_Window *win, int *resized)
@@ -800,11 +828,17 @@ static void fb_events(SDL_Window *win, int *resized)
         if (ev.type == SDL_CONTROLLERBUTTONDOWN
                 && (ev.cbutton.button == SDL_CONTROLLER_BUTTON_GUIDE
                     || ev.cbutton.button == SDL_CONTROLLER_BUTTON_MISC1)) {
-            /* The controller's Guide button: the same mark as F9. */
-            extern volatile int g_recomp_user_mark;
-            extern void xbox_FlightDumpRequest(void);
-            g_recomp_user_mark++;
-            xbox_FlightDumpRequest();
+            if (getenv("RECOMP_VK_FLIGHT") || getenv("RECOMP_TREE_TRACE")) {
+                /* Debugging: the same mark as F9. */
+                extern volatile int g_recomp_user_mark;
+                extern void xbox_FlightDumpRequest(void);
+                g_recomp_user_mark++;
+                xbox_FlightDumpRequest();
+            } else if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_MISC1) {
+                /* The capture button (Stadia, Xbox Series, Switch Pro, the
+                 * DualSense's mic button): a screenshot. */
+                fb_screenshot();
+            }
         }
         if (ev.type == SDL_QUIT) {
             fprintf(stderr, "  [FBWIN] window closed -- exiting\n");
@@ -829,6 +863,9 @@ static void fb_events(SDL_Window *win, int *resized)
                 g_recomp_user_mark++;
                 xbox_FlightDumpRequest();
             }
+            if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_F12
+                    && !ev.key.repeat)
+                fb_screenshot();
             if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_F3
                     && !ev.key.repeat) {
                 /* The FPS counter (RECOMP_FPS_OVERLAY). */

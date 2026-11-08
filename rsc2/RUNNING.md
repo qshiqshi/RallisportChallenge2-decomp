@@ -282,6 +282,14 @@ in the README. What differs from Linux, and why:
   no LOD bias, so the title's bias is dropped.
 - Settings stay in `~/.config/rsc2`, the shader cache in
   `~/.cache/xboxrecomp`. `kill -QUIT <pid>` still dumps every thread.
+- **Controllers** come through SDL: Xbox, DualSense/DualShock, Switch Pro
+  and the Google Stadia controller in Bluetooth mode (analog triggers,
+  rumble) are recognised as they are; the launcher's footer names the one it
+  sees. More mappings go in `~/.config/rsc2/gamecontrollerdb.txt` (SDL's
+  format). The capture button (Stadia, Xbox Series, Switch Pro) or F12 saves
+  a screenshot to `~/Pictures/RalliSport Challenge 2/` (PNG on macOS, BMP
+  elsewhere); with `RECOMP_VK_FLIGHT` or `RECOMP_TREE_TRACE` set it marks the
+  trace as before.
 - `rsc2/tools/macos/make_app.sh [dir]` makes a double-clickable
   `RalliSport Challenge 2.app` (default `/Applications`) that starts this
   build, launcher first; a run's output goes to `~/Library/Logs/rsc2.log`.

@@ -30,9 +30,15 @@ set(KERNEL_SOURCES
     nv2a_combiner.c
     nv2a_vk.c
     wl_color.c
+    png_write.c
 )
 
 add_library(xbox_kernel STATIC ${KERNEL_SOURCES})
+if(APPLE)
+    # png_write.c: screenshots through ImageIO.
+    target_link_libraries(xbox_kernel PUBLIC "-framework ImageIO" "-framework CoreGraphics"
+                          "-framework CoreFoundation")
+endif()
 
 # Vulkan renderer for the pushbuffer executor (nv2a_vk.c, RECOMP_VULKAN=1).
 # Optional: without the Vulkan headers/loader or glslc, nv2a_vk.c builds as

@@ -286,6 +286,27 @@ static void settings_dir(char *out, size_t n)
 #endif
 }
 
+/* <settings dir>/gamecontrollerdb.txt, when there is one: extra controller
+ * mappings in SDL's format, for the launcher and the game (SDL reads the
+ * file named by SDL_GAMECONTROLLERCONFIG_FILE when it opens controllers). */
+static void pad_mappings_file(void)
+{
+    char dir[900], path[1000];
+    FILE *f;
+    settings_dir(dir, sizeof dir);
+    snprintf(path, sizeof path, "%s/gamecontrollerdb.txt", dir);
+    f = fopen(path, "r");
+    if (!f)
+        return;
+    fclose(f);
+#ifdef _WIN32
+    if (!getenv("SDL_GAMECONTROLLERCONFIG_FILE"))
+        _putenv_s("SDL_GAMECONTROLLERCONFIG_FILE", path);
+#else
+    setenv("SDL_GAMECONTROLLERCONFIG_FILE", path, 0);
+#endif
+}
+
 static void settings_load(void)
 {
     char dir[900], line[512];
@@ -483,6 +504,7 @@ static float s_px = 1.0f;
 static Font s_body, s_bold, s_title, s_small, s_smallb;
 static int s_focus = B_START, s_hover = -1;
 static Box s_row_box[O_COUNT], s_btn_box[B_START - B_DEFAULTS + 1];
+static char s_pad_name[96];             /* the first connected controller, for the footer */
 static char s_note[400];               /* the last button's outcome, in the help area */
 
 /* Colours. */
@@ -872,7 +894,7 @@ static void draw(void)
         keycap(&hx, FOOT_Y, "Enter", "start");
         keycap(&hx, FOOT_Y, "Esc", "quit");
         keycap(&hx, FOOT_Y, "Arrows", "choose and change");
-        keycap(&hx, FOOT_Y, "A / Start", "on a controller");
+        keycap(&hx, FOOT_Y, "A / Start", s_pad_name[0] ? s_pad_name : "on a controller");
     }
     draw_button(B_DEFAULTS, 48, BTN_Y, 130, "Defaults", 0);
     draw_button(B_STEAM, 48 + 130 + 12, BTN_Y, 150, "Add to Steam", 0);
@@ -1359,6 +1381,18 @@ static void unfit_event(SDL_Event *ev)
     }
 }
 
+/* The first connected controller's name, for the footer. */
+static void pad_name_update(SDL_GameController **pads, int n)
+{
+    int i;
+    s_pad_name[0] = 0;
+    for (i = 0; i < n; i++)
+        if (pads[i] && SDL_GameControllerName(pads[i])) {
+            snprintf(s_pad_name, sizeof s_pad_name, "%s", SDL_GameControllerName(pads[i]));
+            return;
+        }
+}
+
 static int launcher_window(void)
 {
     SDL_Window *win;
@@ -1372,6 +1406,7 @@ static int launcher_window(void)
      * hosts (the renderer's output size then carries the scale). */
     SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2");
     SDL_SetHint("SDL_WINDOWS_DPI_SCALING", "1");
+    pad_mappings_file();
     if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
         fprintf(stderr, "[LAUNCHER] SDL init failed (%s) -- starting the game\n", SDL_GetError());
         return 1;
@@ -1408,6 +1443,7 @@ static int launcher_window(void)
     for (i = 0; i < SDL_NumJoysticks() && i < 8; i++)
         if (SDL_IsGameController(i))
             pads[i] = SDL_GameControllerOpen(i);
+    pad_name_update(pads, 8);
 
     while (result < 0) {
         SDL_Event ev;
@@ -1532,9 +1568,19 @@ static int launcher_window(void)
                 if (s_hover >= 0 && s_hover < O_COUNT)
                     change(s_hover, ev.wheel.y > 0 ? -1 : 1);
                 break;
+            case SDL_CONTROLLERDEVICEREMOVED:
+                for (i = 0; i < 8; i++)
+                    if (pads[i] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pads[i]))
+                                   == ev.cdevice.which) {
+                        SDL_GameControllerClose(pads[i]);
+                        pads[i] = NULL;
+                    }
+                pad_name_update(pads, 8);
+                break;
             case SDL_CONTROLLERDEVICEADDED:
                 if (ev.cdevice.which < 8 && !pads[ev.cdevice.which])
                     pads[ev.cdevice.which] = SDL_GameControllerOpen(ev.cdevice.which);
+                pad_name_update(pads, 8);
                 break;
             case SDL_CONTROLLERBUTTONDOWN:
                 switch (ev.cbutton.button) {

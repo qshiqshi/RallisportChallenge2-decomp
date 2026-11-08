@@ -40,6 +40,7 @@ void nv2a_vk_clear(const Nv2aVkState *s, uint32_t f, uint32_t c, uint32_t z)
 { (void)s; (void)f; (void)c; (void)z; }
 void nv2a_vk_flush(void) { }
 void nv2a_vk_present(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
+int nv2a_vk_screenshot(const char *path) { (void)path; return 0; }
 void nv2a_vk_present_queued(void) { }
 float nv2a_vk_view_aspect(void) { return 16.0f / 9.0f; }
 void nv2a_vk_zpass(int enable) { (void)enable; }
@@ -2212,7 +2213,9 @@ static void vk_sync_inner(int readback)
         s_probe_nq = 0;
     }
     if (V.present_dump_px) {
-        FILE *f = fopen(V.present_dump_path, "wb");
+        extern int xbox_WritePngRGB(const char *path, const uint8_t *rgb, uint32_t w, uint32_t h);
+        size_t plen = strlen(V.present_dump_path);
+        FILE *f = NULL;
         uint32_t w = V.dump_w, h = V.dump_h, y, x, row = (w * 3 + 3) & ~3u;
         if (!V.rb.coherent) {
             VkMappedMemoryRange mr = { VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE };
@@ -2220,6 +2223,37 @@ static void vk_sync_inner(int readback)
             mr.size = VK_WHOLE_SIZE;
             vkInvalidateMappedMemoryRanges(V.dev, 1, &mr);
         }
+        if (!V.dump_float && plen > 4 && strcmp(V.present_dump_path + plen - 4, ".png") == 0) {
+            /* A screenshot: top row first, RGB, as the window shows it. */
+            uint8_t *rgb = (uint8_t *)malloc((size_t)w * h * 3);
+            int bgr = V.dump_bgr, ok = 0;
+            if (rgb) {
+                for (y = 0; y < h; y++) {
+                    const uint8_t *src = V.present_dump_px + (size_t)y * w * 4;
+                    uint8_t *d = rgb + (size_t)y * w * 3;
+                    for (x = 0; x < w; x++) {
+                        d[x * 3 + 0] = src[x * 4 + (bgr ? 2 : 0)];
+                        d[x * 3 + 1] = src[x * 4 + 1];
+                        d[x * 3 + 2] = src[x * 4 + (bgr ? 0 : 2)];
+                    }
+                }
+                ok = xbox_WritePngRGB(V.present_dump_path, rgb, w, h);
+                free(rgb);
+            }
+            if (ok) {
+                fprintf(stderr, "  [VK] wrote %s (%ux%u, what the window shows)\n",
+                        V.present_dump_path, w, h);
+                V.present_dump_px = NULL;
+                V.dump_gamma = 0;
+            } else {
+                /* No PNG encoder here: the same picture as a BMP. */
+                static char bmp[1100];
+                snprintf(bmp, sizeof bmp, "%.*s.bmp", (int)(plen - 4), V.present_dump_path);
+                V.present_dump_path = bmp;
+            }
+        }
+        if (V.present_dump_px)
+            f = fopen(V.present_dump_path, "wb");
         if (f && V.dump_float) {
             fprintf(f, "RSC2HDR %u %u\n", w, h);
             fwrite(V.present_dump_px, 8, (size_t)w * h, f);
@@ -8501,6 +8535,19 @@ static int swapchain_create(void)
 
 /* RECOMP_VK_PRESENT_DUMP=<file>: the next presented image, as a BMP, read
  * back from the swapchain -- what the window shows, scale included. */
+/* A screenshot asked for (nv2a_vk_screenshot): taken at the next present. */
+static volatile int s_shot_req;
+static char s_shot_path[1024];
+
+int nv2a_vk_screenshot(const char *path)
+{
+    if (V.state <= 0 || !V.swapchain || !path)
+        return 0;
+    snprintf(s_shot_path, sizeof s_shot_path, "%s", path);
+    __atomic_store_n(&s_shot_req, 1, __ATOMIC_RELEASE);
+    return 1;
+}
+
 static void present_dump(void)
 {
     static int left = -1;
@@ -8508,14 +8555,18 @@ static void present_dump(void)
     VkDeviceSize off;
     uint8_t *px;
     VkBufferImageCopy c;
-    if (!path)
-        return;
-    if (left < 0) {
-        const char *e = getenv("RECOMP_VK_PRESENT_DUMP_AT");
-        left = e ? atoi(e) : 600;
+    if (__atomic_exchange_n(&s_shot_req, 0, __ATOMIC_ACQ_REL)) {
+        path = s_shot_path;             /* this frame, whatever the env says */
+    } else {
+        if (!path)
+            return;
+        if (left < 0) {
+            const char *e = getenv("RECOMP_VK_PRESENT_DUMP_AT");
+            left = e ? atoi(e) : 600;
+        }
+        if (left-- != 0)
+            return;
     }
-    if (left-- != 0)
-        return;
     px = (uint8_t *)ring_alloc(&V.rb, (VkDeviceSize)V.sc_ext.width * V.sc_ext.height * 4, 16, &off);
     if (!px)
         return;
@@ -8989,7 +9040,7 @@ static void present_frame(uint32_t va, uint32_t pitch)
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
         overlay_frame(ox, oy);
     }
-    if (getenv("RECOMP_VK_PRESENT_DUMP")) {
+    if (getenv("RECOMP_VK_PRESENT_DUMP") || __atomic_load_n(&s_shot_req, __ATOMIC_ACQUIRE)) {
         barrier_image(V.dcb, V.sc_img[V.sc_idx], VK_IMAGE_ASPECT_COLOR_BIT, 1, 1,
                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                       VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
