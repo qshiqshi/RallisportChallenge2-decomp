@@ -280,7 +280,7 @@ void sub_0030FD2A(void)
 #else
 #include <pthread.h>
 #include <sys/mman.h>
-#if defined(__ANDROID__) && !defined(RSC2_HOST_CORO)
+#if (defined(__ANDROID__) || defined(__APPLE__)) && !defined(RSC2_HOST_CORO)
 #define RSC2_HOST_CORO 1
 #endif
 #if RSC2_HOST_CORO

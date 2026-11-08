@@ -1086,6 +1086,71 @@ static void *fb_thread(void *unused)
     return NULL;
 }
 
+#if defined(__APPLE__)
+/* macOS: AppKit, and with it SDL's windows and events, lives on the main
+ * thread only. xbox_HostRunGame runs the game on a thread of its own and
+ * keeps the main thread here, where it opens the window when the game asks
+ * for it (xbox_FramebufferWindowStart) and runs its loop. */
+static pthread_mutex_t s_host_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  s_host_cv = PTHREAD_COND_INITIALIZER;
+static int s_host_active, s_host_window_req, s_host_game_done, s_host_game_rc;
+static int (*s_host_game_fn)(void *);
+static void *s_host_game_arg;
+
+static void *host_game_thread(void *unused)
+{
+    int rc;
+    (void)unused;
+    pthread_setname_np("game");
+    rc = s_host_game_fn(s_host_game_arg);
+    pthread_mutex_lock(&s_host_mu);
+    s_host_game_rc = rc;
+    s_host_game_done = 1;
+    pthread_cond_broadcast(&s_host_cv);
+    pthread_mutex_unlock(&s_host_mu);
+    return NULL;
+}
+
+int xbox_HostRunGame(int (*game)(void *), void *arg, size_t stack_bytes)
+{
+    pthread_attr_t a;
+    pthread_t th;
+    int r;
+
+    s_host_game_fn = game;
+    s_host_game_arg = arg;
+    pthread_attr_init(&a);
+    pthread_attr_setstacksize(&a, stack_bytes);
+    pthread_mutex_lock(&s_host_mu);
+    s_host_active = 1;
+    pthread_mutex_unlock(&s_host_mu);
+    r = pthread_create(&th, &a, host_game_thread, NULL);
+    pthread_attr_destroy(&a);
+    if (r != 0) {
+        fprintf(stderr, "  [HOST] game thread: pthread_create failed (%d)\n", r);
+        return 1;
+    }
+    pthread_detach(th);
+    for (;;) {
+        int want_window, done, rc;
+        pthread_mutex_lock(&s_host_mu);
+        while (!s_host_window_req && !s_host_game_done)
+            pthread_cond_wait(&s_host_cv, &s_host_mu);
+        want_window = s_host_window_req;
+        done = s_host_game_done;
+        rc = s_host_game_rc;
+        s_host_window_req = 0;
+        pthread_mutex_unlock(&s_host_mu);
+        if (want_window) {
+            fb_thread(NULL);            /* until the window loop ends */
+            continue;
+        }
+        if (done)
+            return rc;
+    }
+}
+#endif
+
 void xbox_FramebufferWindowStart(void)
 {
     pthread_t th;
@@ -1093,6 +1158,22 @@ void xbox_FramebufferWindowStart(void)
         return;
     if (__atomic_exchange_n(&s_fb_running, 1, __ATOMIC_ACQ_REL) != 0)
         return;
+#if defined(__APPLE__)
+    pthread_mutex_lock(&s_host_mu);
+    if (s_host_active) {
+        s_host_window_req = 1;
+        pthread_cond_broadcast(&s_host_cv);
+        pthread_mutex_unlock(&s_host_mu);
+        return;
+    }
+    pthread_mutex_unlock(&s_host_mu);
+    if (!pthread_main_np()) {
+        fprintf(stderr, "  [FBWIN] macOS needs the window on the main thread: "
+                        "start the game with xbox_HostRunGame\n");
+        s_fb_running = 0;
+        return;
+    }
+#endif
     if (pthread_create(&th, NULL, fb_thread, NULL) == 0)
         pthread_detach(th);
     else

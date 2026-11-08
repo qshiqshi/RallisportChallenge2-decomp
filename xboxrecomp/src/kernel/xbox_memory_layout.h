@@ -190,6 +190,7 @@ void     xbox_Nv2aIrqInit(void);
 int      xbox_Nv2aIrqEnabled(void);
 void     xbox_Nv2aAckWake(void);        /* a kick: wake an idle ack loop */
 int      xbox_Nv2aIrqOwns(uint32_t xbox_va);
+int      xbox_Nv2aIrqModels(uint32_t xbox_va);
 int      xbox_Nv2aIrqHandleMmio(void *ctx, uint32_t xbox_va);
 int      xbox_Nv2aIrqTick(void);
 void     xbox_Nv2aIrqRaiseVblank(void);

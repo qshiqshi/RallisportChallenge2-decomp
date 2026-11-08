@@ -2040,9 +2040,14 @@ VOID RaiseException(DWORD code, DWORD flags, DWORD nargs, const ULONG_PTR *args)
     /* TODO: on Windows this does not return; SEH dispatch unimplemented. */
 }
 
-#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+#if (defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))) \
+    || (defined(__APPLE__) && defined(__aarch64__))
+#if defined(__APPLE__)
+#include <sys/ucontext.h>   /* the type only; <ucontext.h> wants _XOPEN_SOURCE */
+#else
 #include <ucontext.h>
-#if defined(__aarch64__)
+#endif
+#if defined(__linux__) && defined(__aarch64__)
 #include <asm/sigcontext.h>
 #endif
 
@@ -2092,6 +2097,48 @@ static void veh_store(const CONTEXT *ctx, ucontext_t *uc)
         g[s_veh_gregs[k]] = (greg_t)r[k];
     g[REG_RIP] = (greg_t)ctx->Rip;
     g[REG_EFL] = (greg_t)((g[REG_EFL] & ~0xFFFFFFFFLL) | ctx->EFlags);
+}
+#elif defined(__APPLE__)
+/* macOS on Apple Silicon: uc_mcontext is a pointer to the Mach thread,
+ * exception and NEON state. x29/x30 are named __fp/__lr there, and the
+ * exception state carries the fault syndrome (ESR, WnR bit 6) directly.
+ * Plain arm64 only: arm64e signs pc/lr/fp and makes these fields opaque. */
+#if defined(__DARWIN_OPAQUE_ARM_THREAD_STATE64) && __DARWIN_OPAQUE_ARM_THREAD_STATE64
+#error "arm64e thread state is opaque; build for arm64"
+#endif
+static int veh_load(CONTEXT *ctx, ucontext_t *uc)
+{
+    _STRUCT_MCONTEXT64 *mc = uc->uc_mcontext;
+    uint32_t ec;
+    int i, write = 0;
+    for (i = 0; i < 29; i++)
+        ctx->X[i] = mc->__ss.__x[i];
+    ctx->X[29] = mc->__ss.__fp;
+    ctx->X[30] = mc->__ss.__lr;
+    ctx->Sp = mc->__ss.__sp;
+    ctx->Pc = mc->__ss.__pc;
+    ctx->Pstate = mc->__ss.__cpsr;
+    memcpy(ctx->V, mc->__ns.__v, sizeof(ctx->V));
+    ctx->HasV = 1;
+    ec = (mc->__es.__esr >> 26) & 0x3F;
+    if (ec == 0x24 || ec == 0x25)              /* data abort, lower/same EL */
+        write = (mc->__es.__esr >> 6) & 1;     /* WnR */
+    return write;
+}
+
+static void veh_store(const CONTEXT *ctx, ucontext_t *uc)
+{
+    _STRUCT_MCONTEXT64 *mc = uc->uc_mcontext;
+    int i;
+    for (i = 0; i < 29; i++)
+        mc->__ss.__x[i] = ctx->X[i];
+    mc->__ss.__fp = ctx->X[29];
+    mc->__ss.__lr = ctx->X[30];
+    mc->__ss.__sp = ctx->Sp;
+    mc->__ss.__pc = ctx->Pc;
+    mc->__ss.__cpsr = (uint32_t)ctx->Pstate;
+    if (ctx->HasV)
+        memcpy(mc->__ns.__v, ctx->V, sizeof(ctx->V));
 }
 #else
 /* AArch64 keeps the extra state as a chain of tagged records in

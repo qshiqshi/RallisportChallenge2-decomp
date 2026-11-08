@@ -139,6 +139,23 @@ endif()
 # Link against the xboxrecomp umbrella target (all 6 runtime libraries)
 target_link_libraries(${PROJECT_NAME} PRIVATE xboxrecomp)
 
+# A build without the game (-DRSC2_SMOKE=ON, in its own build directory):
+# tools/macos/smoke_stubs.c stands in for the generated code, and the
+# toolkit's template stands in for the generated recomp_types.h, so the host
+# side can be built and run on a machine that has no copy of the game.
+option(RSC2_SMOKE "Stand-ins for the generated code: test the host side without the game" OFF)
+if(RSC2_SMOKE)
+    if(RECOMP_GEN_SOURCES)
+        message(FATAL_ERROR "RSC2_SMOKE is for a build without src/recomp/gen; use another build directory")
+    endif()
+    set(RSC2_SMOKE_INC ${CMAKE_CURRENT_BINARY_DIR}/smoke_inc)
+    configure_file(${XBOXRECOMP_DIR}/templates/runtime/recomp_types.h
+                   ${RSC2_SMOKE_INC}/recomp/gen/recomp_types.h COPYONLY)
+    target_include_directories(${PROJECT_NAME} PRIVATE ${RSC2_SMOKE_INC})
+    target_sources(${PROJECT_NAME} PRIVATE tools/macos/smoke_stubs.c)
+    message(STATUS "rsc2: smoke build -- no game code, host side only")
+endif()
+
 # Include paths for generated recomp headers
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src

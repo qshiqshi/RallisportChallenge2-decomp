@@ -44,7 +44,11 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <signal.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>        /* task_threads: the thread dump */
+#else
 #include <sys/syscall.h>
+#endif
 #include <pthread.h>
 #endif
 #include <stdio.h>
@@ -423,11 +427,45 @@ static void thread_bt_handler(int sig)
     int n, len;
     (void)sig;
     n = backtrace(frames, 48);
+#if defined(__APPLE__)
+    {
+        uint64_t tid = 0;
+        pthread_threadid_np(NULL, &tid);
+        len = snprintf(hdr, sizeof(hdr), "--- thread %llu ---\n", (unsigned long long)tid);
+    }
+#else
     len = snprintf(hdr, sizeof(hdr), "--- thread %ld ---\n", (long)syscall(SYS_gettid));
+#endif
     if (write(STDERR_FILENO, hdr, (size_t)len) < 0) return;
     backtrace_symbols_fd(frames, n, STDERR_FILENO);
 }
 
+#if defined(__APPLE__)
+/* macOS has no /proc: the task's threads come from Mach, and each gets the
+ * signal through its pthread. */
+static void all_threads_bt_handler(int sig)
+{
+    thread_act_array_t th;
+    mach_msg_type_number_t n = 0, i;
+    mach_port_t self = mach_thread_self();
+    (void)sig;
+    if (task_threads(mach_task_self(), &th, &n) != KERN_SUCCESS)
+        return;
+    for (i = 0; i < n; i++) {
+        if (th[i] == self) {
+            thread_bt_handler(SIGUSR2);
+        } else {
+            pthread_t pt = pthread_from_mach_thread_np(th[i]);
+            if (pt)
+                pthread_kill(pt, SIGUSR2);
+        }
+        usleep(20000);   /* keep the dumps from interleaving */
+        mach_port_deallocate(mach_task_self(), th[i]);
+    }
+    vm_deallocate(mach_task_self(), (vm_address_t)th, n * sizeof(th[0]));
+    mach_port_deallocate(mach_task_self(), self);
+}
+#else
 static void all_threads_bt_handler(int sig)
 {
     DIR *d = opendir("/proc/self/task");
@@ -446,6 +484,7 @@ static void all_threads_bt_handler(int sig)
     }
     closedir(d);
 }
+#endif
 
 static void install_thread_dump(void)
 {
@@ -464,6 +503,7 @@ static void install_thread_dump(void)
 /* The command line, for the launcher's --launcher / --no-launcher. */
 static int s_argc;
 static char **s_argv;
+static int s_launcher_done;   /* macOS: main() ran it on the main thread */
 
 #ifdef _WIN32
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
@@ -484,7 +524,7 @@ static int rsc2_main(void *hInstance, void *hPrevInstance,
     /* The launcher (launcher.c): saved settings into the environment, after
      * a settings window unless it is turned off. Runs before the defaults
      * below so its choices take their place. */
-    if (!rsc2_launcher(s_argc, s_argv))
+    if (!s_launcher_done && !rsc2_launcher(s_argc, s_argv))
         return 0;
 
     /* Runtime options this title needs, as defaults (an explicit value in
@@ -962,6 +1002,17 @@ int SDL_main(int argc, char **argv)
 #endif
 
 #ifndef __ANDROID__
+#if defined(__APPLE__)
+/* xboxrecomp/src/video/fb_present.c */
+extern int xbox_HostRunGame(int (*game)(void *), void *arg, size_t stack_bytes);
+
+static int rsc2_game_thread(void *unused)
+{
+    (void)unused;
+    return rsc2_main(NULL, NULL, NULL, 0);
+}
+#endif
+
 /* Console entry point (for debugging -- lets you see printf output) */
 int main(int argc, char **argv)
 {
@@ -969,6 +1020,14 @@ int main(int argc, char **argv)
     s_argv = argv;
 #ifdef _WIN32
     return WinMain(GetModuleHandle(NULL), NULL, GetCommandLineA(), SW_SHOW);
+#elif defined(__APPLE__)
+    /* AppKit needs the main thread for every window: the launcher's runs
+     * here first, then the game gets a thread of its own (64 MB of stack:
+     * lifted recursion runs native) while this one serves the game window. */
+    if (!rsc2_launcher(s_argc, s_argv))
+        return 0;
+    s_launcher_done = 1;
+    return xbox_HostRunGame(rsc2_game_thread, NULL, (size_t)64 << 20);
 #else
     return rsc2_main(NULL, NULL, NULL, 0);
 #endif

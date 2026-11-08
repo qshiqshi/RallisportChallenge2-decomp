@@ -64,6 +64,13 @@ int  video_dump_frame_bmp(const char *path);
 int xbox_FramebufferKeyDown(int vk);
 
 void xbox_FramebufferWindowStart(void);
+#if defined(__APPLE__)
+#include <stddef.h>
+/* macOS: run game(arg) on a thread with stack_bytes of stack and keep the
+ * calling (main) thread for the window, which AppKit requires. Returns the
+ * game's return value. */
+int xbox_HostRunGame(int (*game)(void *), void *arg, size_t stack_bytes);
+#endif
 void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch);
 int  xbox_FramebufferDumpBmp(const char *path);
 /* Title bar: "<XBE title> | FPS: n | draws: n". The name is the certificate's

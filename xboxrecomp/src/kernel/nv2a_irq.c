@@ -44,6 +44,9 @@
 #include "kernel.h"
 #include "xbox_memory_layout.h"
 #include "../platform/mmio_decode.h"
+#if !defined(_WIN32)
+#include <unistd.h>                     /* sysconf: the host page size */
+#endif
 
 #define NV2A_BASE        0xFD000000u
 #define PG_PMC           0x000000u
@@ -89,7 +92,18 @@
 
 static int s_enabled;
 static int s_pfb;                       /* PFB page trapped too */
-static uint8_t s_store[5][PAGE];        /* backing for everything else */
+/* Backing for everything that is not modelled, per trapped *host* page.
+ *
+ * A host page is the unit mprotect works in: 4 KB on x86 and most ARM
+ * Linux, 16 KB on Apple silicon. There a modelled 4 KB page shares its host
+ * page with neighbours -- PMC's holds PBUS and PFIFO, PTIMER's sits at
+ * +0x1000 in its own -- so the whole host page is trapped, and the
+ * neighbours are served from here as the plain memory they were. */
+#define NV2A_HPAGES 5
+static uint32_t s_hpage = PAGE;         /* host page size */
+static int      s_nhost;
+static uint32_t s_host_off[NV2A_HPAGES];
+static uint8_t *s_host_store[NV2A_HPAGES];
 static volatile uint32_t s_pcrtc_intr, s_ptimer_intr, s_pgraph_intr;
 static volatile uint32_t s_alarm, s_alarm_armed;
 static volatile uint32_t s_fifo_off;    /* the ISR's DPC turned PGRAPH_FIFO off */
@@ -110,20 +124,31 @@ static int page_index(uint32_t off)
     }
 }
 
+/* The trapped host page holding `off`, or -1. */
+static int host_index(uint32_t off)
+{
+    uint32_t base = off & ~(s_hpage - 1);
+    int i;
+    for (i = 0; i < s_nhost; i++)
+        if (s_host_off[i] == base)
+            return i;
+    return -1;
+}
+
 static uint32_t store_rd(uint32_t off)
 {
-    int p = page_index(off);
+    int h = host_index(off);
     uint32_t v;
-    if (p < 0) return 0;
-    memcpy(&v, &s_store[p][off & (PAGE - 1) & ~3u], 4);
+    if (h < 0) return 0;
+    memcpy(&v, &s_host_store[h][(off - s_host_off[h]) & ~3u], 4);
     return v;
 }
 
 static void store_wr(uint32_t off, uint32_t v)
 {
-    int p = page_index(off);
-    if (p < 0) return;
-    memcpy(&s_store[p][off & (PAGE - 1) & ~3u], &v, 4);
+    int h = host_index(off);
+    if (h < 0) return;
+    memcpy(&s_host_store[h][(off - s_host_off[h]) & ~3u], &v, 4);
 }
 
 /* Notifies queued for the ISR (RECOMP_NV2A_NOTIFY_ASYNC, on by default):
@@ -289,10 +314,32 @@ int xbox_Nv2aIrqEnabled(void) { return __atomic_load_n(&s_enabled, __ATOMIC_SEQ_
  * ahead of the executor. */
 int xbox_Nv2aIrqAsync(void) { return s_enabled && s_pfb; }
 
+/* Every access to a trapped host page faults, so the fault handler takes
+ * all of them: the modelled registers and their neighbours alike. */
 int xbox_Nv2aIrqOwns(uint32_t va)
 {
     return s_enabled && va >= NV2A_BASE && va < NV2A_BASE + 0x01000000u
+        && host_index(va - NV2A_BASE) >= 0;
+}
+
+/* A register with this model's semantics (on one of its 4 KB pages). */
+int xbox_Nv2aIrqModels(uint32_t va)
+{
+    return s_enabled && va >= NV2A_BASE && va < NV2A_BASE + 0x01000000u
         && page_index(va - NV2A_BASE) >= 0;
+}
+
+/* Where the plain neighbours of the modelled registers live while their
+ * host page is trapped: the ack thread reads and writes them there rather
+ * than faulting on every access. NULL when `off` is not on a trapped page. */
+volatile uint32_t *xbox_Nv2aIrqBacking(uint32_t off)
+{
+    int h;
+    if (!__atomic_load_n(&s_enabled, __ATOMIC_SEQ_CST))
+        return NULL;
+    h = host_index(off);
+    return h < 0 ? NULL
+                 : (volatile uint32_t *)&s_host_store[h][(off - s_host_off[h]) & ~3u];
 }
 
 int xbox_Nv2aIrqHandleMmio(void *ctx, uint32_t va)
@@ -325,7 +372,7 @@ uint32_t xbox_Nv2aIrqPeek(uint32_t off)
  * page when it serves PGRAPH, else 0 (the caller writes plain memory). */
 int xbox_Nv2aIrqPoke(uint32_t off, uint32_t v)
 {
-    if (!s_enabled || page_index(off) < 0)
+    if (!s_enabled || host_index(off) < 0)
         return 0;
     store_wr(off, v);
     return 1;
@@ -469,23 +516,45 @@ void xbox_Nv2aIrqInit(void)
         return;
     }
     clock_gettime(CLOCK_MONOTONIC, &s_t0);
-    for (i = 0; i < npages; i++)
-        memcpy(s_store[i], (void *)((uintptr_t)off + NV2A_BASE + pages[i]), PAGE);
+#if !defined(_WIN32)
+    {
+        long hp = sysconf(_SC_PAGESIZE);
+        if (hp > (long)PAGE && hp <= 0x10000 && !(hp & (hp - 1)))
+            s_hpage = (uint32_t)hp;
+    }
+#endif
+    s_nhost = 0;
+    for (i = 0; i < npages; i++) {
+        uint32_t base = pages[i] & ~(s_hpage - 1);
+        if (host_index(pages[i]) >= 0)
+            continue;                   /* shares a host page with one before */
+        s_host_store[s_nhost] = (uint8_t *)malloc(s_hpage);
+        if (!s_host_store[s_nhost]) {
+            fprintf(stderr, "  NV2A-IRQ: no memory for the backing store; disabled\n");
+            s_nhost = 0;
+            return;
+        }
+        memcpy(s_host_store[s_nhost], (void *)((uintptr_t)off + NV2A_BASE + base), s_hpage);
+        s_host_off[s_nhost++] = base;
+    }
     /* On before the pages close: the ack thread checks this to keep its
      * hands off them, and it runs concurrently with this. */
     __atomic_store_n(&s_enabled, 1, __ATOMIC_SEQ_CST);
-    for (i = 0; i < npages; i++) {
-        void *at = (void *)((uintptr_t)off + NV2A_BASE + pages[i]);
+    for (i = 0; i < s_nhost; i++) {
+        void *at = (void *)((uintptr_t)off + NV2A_BASE + s_host_off[i]);
         DWORD old;
-        if (!VirtualProtect(at, PAGE, PAGE_NOACCESS, &old)) {
-            fprintf(stderr, "  NV2A-IRQ: cannot trap page +0x%06X; disabled\n", pages[i]);
+        if (!VirtualProtect(at, s_hpage, PAGE_NOACCESS, &old)) {
+            fprintf(stderr, "  NV2A-IRQ: cannot trap page +0x%06X; disabled\n", s_host_off[i]);
             while (--i >= 0)
-                VirtualProtect((void *)((uintptr_t)off + NV2A_BASE + pages[i]),
-                               PAGE, PAGE_READWRITE, &old);
+                VirtualProtect((void *)((uintptr_t)off + NV2A_BASE + s_host_off[i]),
+                               s_hpage, PAGE_READWRITE, &old);
             __atomic_store_n(&s_enabled, 0, __ATOMIC_SEQ_CST);
             return;
         }
     }
+    if (s_hpage > PAGE)
+        fprintf(stderr, "  NV2A-IRQ: %u KB host pages: %d trapped, their neighbours served as memory\n",
+                s_hpage >> 10, s_nhost);
     fprintf(stderr, "  NV2A-IRQ: PMC, PTIMER and PCRTC interrupt registers modelled%s\n",
             npages > 3 ? " (and the PFB flush and PGRAPH's notify)" : "");
 }

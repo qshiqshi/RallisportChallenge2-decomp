@@ -13,14 +13,23 @@
 #include <stdlib.h>
 
 #if defined(__aarch64__)
+/* Mach-O (macOS) prefixes C symbols with an underscore and has no
+ * .type/.size; coro_start is a hidden global so C can take its address. */
+#if defined(__APPLE__)
+#define CORO_HEAD     ".globl _coro_switch\n" "_coro_switch:\n"
+#define CORO_SIZE     ""
+#define CORO_START    ".globl _coro_start\n" ".private_extern _coro_start\n" "_coro_start:\n"
+#else
+#define CORO_HEAD     ".globl coro_switch\n" ".type coro_switch, %function\n" "coro_switch:\n"
+#define CORO_SIZE     ".size coro_switch, .-coro_switch\n"
+#define CORO_START    "coro_start:\n"
+#endif
 /* x19-x28, fp, lr and d8-d15: what AAPCS64 says a callee keeps. 160 bytes,
  * rounded to 176 to keep sp 16-aligned. */
 __asm__(
     ".text\n"
     ".p2align 4\n"
-    ".globl coro_switch\n"
-    ".type coro_switch, %function\n"
-    "coro_switch:\n"
+    CORO_HEAD
     "    sub  sp, sp, #176\n"
     "    stp  x19, x20, [sp, #0]\n"
     "    stp  x21, x22, [sp, #16]\n"
@@ -47,16 +56,20 @@ __asm__(
     "    ldp  d14, d15, [sp, #144]\n"
     "    add  sp, sp, #176\n"
     "    ret\n"
-    ".size coro_switch, .-coro_switch\n"
+    CORO_SIZE
     /* First activation lands here with fn in x19 and its argument in x20. */
     ".p2align 4\n"
-    "coro_start:\n"
+    CORO_START
     "    mov  x0, x20\n"
     "    mov  x29, #0\n"
     "    blr  x19\n"
     "    brk  #0\n");
 
+#if defined(__APPLE__)
+extern char coro_start[] __attribute__((visibility("hidden")));
+#else
 extern char coro_start[];
+#endif
 
 void *coro_init(void *stack, size_t size, void (*fn)(void *), void *arg)
 {

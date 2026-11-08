@@ -12,7 +12,7 @@
  * 4. Set memory protection (read-only for .rdata)
  */
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 #define _GNU_SOURCE 1
 #include <dlfcn.h>
 #include "../platform/host_backtrace.h"   /* backtrace(), also on Android */
@@ -1070,6 +1070,17 @@ void xbox_Nv2aPatternColor0(uint32_t v)
                          __ATOMIC_RELEASE);
 }
 
+/* An NV2A register as the ack thread touches it: aperture memory, or, where
+ * nv2a_irq.c traps the host page it is on (a 16 KB Apple silicon page holds
+ * a modelled 4 KB page and its neighbours), that model's backing store, so
+ * the thread does not fault on every access. */
+static volatile uint32_t *nv2a_ack_reg(volatile uint32_t *regs, uint32_t off)
+{
+    extern volatile uint32_t *xbox_Nv2aIrqBacking(uint32_t off);
+    volatile uint32_t *b = xbox_Nv2aIrqBacking(off);
+    return b ? b : (volatile uint32_t *)((char *)regs + off);
+}
+
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 {
     volatile uint32_t *regs = (volatile uint32_t *)param;
@@ -1082,10 +1093,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
             /* The interrupt status registers have real semantics when
              * nv2a_irq.c models them; their pages are trapped then, too. */
             if (xbox_Nv2aIrqEnabled()
-                    && xbox_Nv2aIrqOwns(0xFD000000u + NV2A_ACK[i].offset))
+                    && xbox_Nv2aIrqModels(0xFD000000u + NV2A_ACK[i].offset))
                 continue;
-            volatile uint32_t *r =
-                (volatile uint32_t *)((char *)regs + NV2A_ACK[i].offset);
+            volatile uint32_t *r = nv2a_ack_reg(regs, NV2A_ACK[i].offset);
             if (*r & NV2A_ACK[i].busy_mask) {
                 *r &= ~NV2A_ACK[i].busy_mask;
                 if (i == 0) s_ack_clears++;
@@ -1294,8 +1304,8 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
             uint32_t get_now = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET);
             int caught_up = put_now == get_now;
             if (caught_up && !(xbox_Nv2aIrqEnabled()
-                               && xbox_Nv2aIrqOwns(0xFD000000u + NV2A_ACK[0].offset))) {
-                volatile uint32_t *r = (volatile uint32_t *)((char *)regs + NV2A_ACK[0].offset);
+                               && xbox_Nv2aIrqModels(0xFD000000u + NV2A_ACK[0].offset))) {
+                volatile uint32_t *r = nv2a_ack_reg(regs, NV2A_ACK[0].offset);
                 if (*r & NV2A_ACK[0].busy_mask) {
                     *r &= ~NV2A_ACK[0].busy_mask;
                     s_ack_clears++;
@@ -1304,8 +1314,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                 }
             }
             for (size_t i = 0; i < sizeof(NV2A_IDLE) / sizeof(NV2A_IDLE[0]); i++) {
-                volatile uint32_t *r =
-                    (volatile uint32_t *)((char *)regs + NV2A_IDLE[i].offset);
+                volatile uint32_t *r = nv2a_ack_reg(regs, NV2A_IDLE[i].offset);
                 if (caught_up)
                     *r |= NV2A_IDLE[i].idle_mask;
                 else
@@ -1345,7 +1354,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
              * follow the flush that woke the loop. */
             uint32_t put = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
             uint32_t get = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_GET);
-            uint32_t flush = *(volatile uint32_t *)((char *)regs + NV2A_ACK[0].offset);
+            uint32_t flush = *nv2a_ack_reg(regs, NV2A_ACK[0].offset);
             if (put == get && !(flush & NV2A_ACK[0].busy_mask))
                 idle++;
             else
@@ -1698,7 +1707,7 @@ static LONG CALLBACK readtrap_veh(PEXCEPTION_POINTERS ep)
     if (__atomic_add_fetch(&g_rt_hits, 1, __ATOMIC_RELAXED) <= 64) {
         uint32_t va = (uint32_t)(fault - (uintptr_t)g_memory_offset);
         const char *name = "?";
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
         Dl_info di;
         if (dladdr((void *)(uintptr_t)CONTEXT_PC(ep->ContextRecord), &di) && di.dli_sname)
             name = di.dli_sname;
@@ -1706,7 +1715,7 @@ static LONG CALLBACK readtrap_veh(PEXCEPTION_POINTERS ep)
         fprintf(stderr, "[READTRAP] %s at %08X by %s (guest esp %08X)\n",
                 ep->ExceptionRecord->ExceptionInformation[0] ? "write" : "read",
                 va, name, g_esp);
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
         {
             void *bt[10];
             int n = backtrace(bt, 10), k;
@@ -1782,7 +1791,7 @@ static void watch_report(void)
         return;
     fprintf(stderr, "[WATCH] [%08X] %08X -> %08X  (esp=%08X)\n",
             g_watch_va, g_watch_last, now, esp);
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     /* The writer itself: the host instruction that faulted belongs to one
      * generated function, and with -rdynamic its name is the guest address.
      * The stack chain below is only a lead; this is the answer. */

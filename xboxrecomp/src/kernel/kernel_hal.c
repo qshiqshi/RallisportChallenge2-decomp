@@ -22,6 +22,9 @@
 #include <linux/futex.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#elif defined(__APPLE__)
+#include <os/os_sync_wait_on_address.h>   /* macOS 14.4+ */
+#include <os/clock.h>
 #endif
 #if defined(_MSC_VER) && !defined(__clang__)
 #pragma intrinsic(_ReturnAddress)
@@ -244,6 +247,16 @@ static void dispatch_acquire(void)
             syscall(SYS_futex, &s_disp_owner, FUTEX_WAIT_PRIVATE, cur, &ts, NULL, 0);
             InterlockedDecrement(&s_disp_waiters);
         }
+#elif defined(__APPLE__)
+        /* The same sleep on the owner word, through macOS's futex. */
+        LONG cur = s_disp_owner;
+        if (cur != 0) {
+            InterlockedIncrement(&s_disp_waiters);
+            os_sync_wait_on_address_with_timeout((void *)&s_disp_owner, (uint64_t)(uint32_t)cur,
+                                                 sizeof(s_disp_owner), OS_SYNC_WAIT_ON_ADDRESS_NONE,
+                                                 OS_CLOCK_MACH_ABSOLUTE_TIME, 2000000ull);
+            InterlockedDecrement(&s_disp_waiters);
+        }
 #endif
         if (GetTickCount64() - start > 50) {
             if (InterlockedIncrement(&s_disp_timeouts) <= 10) {
@@ -254,7 +267,7 @@ static void dispatch_acquire(void)
             }
             return;
         }
-#if !defined(__linux__)
+#if !defined(__linux__) && !defined(__APPLE__)
         Sleep(0);
 #endif
     }
@@ -272,6 +285,10 @@ static void dispatch_release(void)
          * its sleep: one of the two sees the other. */
         if (__atomic_load_n(&s_disp_waiters, __ATOMIC_SEQ_CST))
             syscall(SYS_futex, &s_disp_owner, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
+#elif defined(__APPLE__)
+        if (__atomic_load_n(&s_disp_waiters, __ATOMIC_SEQ_CST))
+            os_sync_wake_by_address_any((void *)&s_disp_owner, sizeof(s_disp_owner),
+                                        OS_SYNC_WAKE_BY_ADDRESS_NONE);
 #endif
     }
 }

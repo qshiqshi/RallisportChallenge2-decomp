@@ -450,7 +450,7 @@ VOID RaiseException(DWORD code, DWORD flags, DWORD nargs, const ULONG_PTR *args)
  * 
  * Note: GCC needs correct struct. This is from nxdk
  * */
-#ifdef __linux__
+#if defined(__linux__) || (defined(__APPLE__) && defined(__aarch64__))
 typedef struct _EXCEPTION_POINTERS
 {
     PEXCEPTION_RECORD ExceptionRecord;

@@ -7811,7 +7811,8 @@ static void bridge_NtProtectVirtualMemory(void)
     uint32_t size    = size_ptr ? BRIDGE_MEM32(size_ptr) : 0;
     DWORD old = 0;
 
-    if (VirtualProtect(XBOX_TO_NATIVE(base_va), size, (DWORD)new_prot, &old)) {
+    extern BOOL xbox_GuestVirtualProtect(LPVOID address, SIZE_T size, DWORD prot, PDWORD old);
+    if (xbox_GuestVirtualProtect(XBOX_TO_NATIVE(base_va), size, (DWORD)new_prot, &old)) {
         if (old_ptr)
             BRIDGE_MEM32(old_ptr) = (uint32_t)old;
         g_eax = 0;  /* STATUS_SUCCESS */

@@ -4607,8 +4607,22 @@ static void flip_pace(void)
         struct timespec ts;
         ts.tv_sec = (time_t)t;
         ts.tv_nsec = (long)((t - (double)ts.tv_sec) * 1e9);
+#if defined(__APPLE__)
+        /* No clock_nanosleep on macOS: sleep the time left to the same
+         * deadline (flip_now_s is CLOCK_MONOTONIC too), then spin. */
+        {
+            double rel = t - flip_now_s();
+            if (rel > 0.0) {
+                ts.tv_sec = (time_t)rel;
+                ts.tv_nsec = (long)((rel - (double)ts.tv_sec) * 1e9);
+                while (nanosleep(&ts, &ts) == -1 && errno == EINTR)
+                    ;
+            }
+        }
+#else
         while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR)
             ;
+#endif
     }
     while (flip_now_s() < next)
         ;

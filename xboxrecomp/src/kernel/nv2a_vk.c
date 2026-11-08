@@ -89,6 +89,9 @@ int nv2a_vk_draw_program_raw(const Nv2aVkState *s, uint32_t hash, const Nv2aVkVe
 #include <adrenotools/driver.h>
 #endif
 #else
+#if defined(__APPLE__)
+#define VK_ENABLE_BETA_EXTENSIONS 1   /* VK_KHR_portability_subset (MoltenVK) */
+#endif
 #include <vulkan/vulkan.h>
 #endif
 
@@ -164,6 +167,8 @@ static const uint32_t s_frag_fast_spv[] =
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#elif defined(__APPLE__)
+#include <pthread/qos.h>
 #endif
 
 #define VK_RING_VTX    (96u << 20)
@@ -488,6 +493,8 @@ static struct {
     WlcDesc wl_desc;            /* mode 3: what the window was told */
     float hdr_paper, hdr_peak, hdr_strength, hdr_glow, hdr_knee;
     int has_colorspace_ext, has_hdr_meta;
+    int portability;            /* VK_KHR_portability_subset (MoltenVK) */
+    int no_lod_bias;            /* ... without samplerMipLodBias */
     /* VK_EXT_vertex_input_dynamic_state (RECOMP_VK_RAW_VERTS=0 leaves it
      * off): every pipeline built by pipe_build takes its vertex layout at
      * the draw, so a program draw can hand the title's vertices over as
@@ -2744,6 +2751,9 @@ static int vk_init(void)
             "VK_KHR_wayland_surface", "VK_KHR_win32_surface",
             "VK_KHR_android_surface", "VK_EXT_metal_surface",
             "VK_EXT_swapchain_colorspace",
+            /* MoltenVK is a portability driver: the loader lists it only
+             * when the instance asks for those (macOS). */
+            "VK_KHR_portability_enumeration",
         };
         static const char *on[12];
         VkExtensionProperties ep[256];
@@ -2755,6 +2765,8 @@ static int vk_init(void)
                     on[n++] = want[j];
                     if (!strcmp(want[j], "VK_EXT_swapchain_colorspace"))
                         V.has_colorspace_ext = 1;
+                    if (!strcmp(want[j], "VK_KHR_portability_enumeration"))
+                        ici.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
                     break;
                 }
         ici.enabledExtensionCount = n;
@@ -2875,7 +2887,7 @@ static int vk_init(void)
         }
         dci.pNext = &f2;
         {
-            static const char *swext[6];
+            static const char *swext[8];
             int has_pid = 0, has_pw = 0, has_vi = 0, nx = 0;
             const char *ft = getenv("RECOMP_FRAME_TIMES");
             VkExtensionProperties ep[512];
@@ -2892,6 +2904,25 @@ static int vk_init(void)
                     has_pw = 1;
                 if (!strcmp(ep[k].extensionName, "VK_EXT_vertex_input_dynamic_state"))
                     has_vi = 1;
+                if (!strcmp(ep[k].extensionName, "VK_KHR_portability_subset"))
+                    V.portability = 1;
+            }
+            if (V.portability) {
+                /* Enabling it is required where it is offered (MoltenVK);
+                 * its features say what Metal leaves out. */
+                swext[nx++] = "VK_KHR_portability_subset";
+#if defined(VK_KHR_portability_subset)
+                {
+                    VkPhysicalDevicePortabilitySubsetFeaturesKHR ps = {
+                        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR };
+                    VkPhysicalDeviceFeatures2 q2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+                    q2.pNext = &ps;
+                    vkGetPhysicalDeviceFeatures2(V.pd, &q2);
+                    V.no_lod_bias = !ps.samplerMipLodBias;
+                }
+#endif
+                fprintf(stderr, "  [VK] portability driver%s\n",
+                        V.no_lod_bias ? " (no sampler LOD bias)" : "");
             }
             {
                 static VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT fvi = {
@@ -3595,6 +3626,8 @@ static VkSampler sampler(const Nv2aVkTex *t, uint32_t levels)
         }
         bias = (mode ? tex_lod_bias(t) : 0.0f) + extra;
         ci.mipLodBias = bias > lim ? lim : (bias < -lim ? -lim : bias);
+        if (V.no_lod_bias)
+            ci.mipLodBias = 0.0f;   /* Metal samplers have no LOD bias */
     }
     /* Only where the title filters linearly within a mip level; its point-
      * sampled textures stay point-sampled. */
@@ -5715,6 +5748,8 @@ static void *warm_thread(void *unused)
     (void)unused;
 #if defined(__linux__)
     setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);   /* behind the game */
+#elif defined(__APPLE__)
+    pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);         /* behind the game */
 #endif
     for (i = 0; i < s_nwjobs; i++) {
         const WarmRec *r = &s_wjobs[i].r;
@@ -7446,6 +7481,19 @@ int nv2a_vk_device_names(char (*names)[256], int max)
     app.pApplicationName = "xboxrecomp";
     app.apiVersion = VK_API_VERSION_1_3;
     ici.pApplicationInfo = &app;
+    {
+        static const char *pe[1] = { "VK_KHR_portability_enumeration" };
+        VkExtensionProperties ep[256];
+        uint32_t ne = 256, k;
+        vkEnumerateInstanceExtensionProperties(NULL, &ne, ep);
+        for (k = 0; k < ne; k++)
+            if (!strcmp(ep[k].extensionName, pe[0])) {
+                ici.enabledExtensionCount = 1;
+                ici.ppEnabledExtensionNames = pe;
+                ici.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+                break;
+            }
+    }
     if (vkCreateInstance(&ici, NULL, &inst) != VK_SUCCESS)
         return 0;
     if (vkEnumeratePhysicalDevices(inst, &npd, pds) < 0)

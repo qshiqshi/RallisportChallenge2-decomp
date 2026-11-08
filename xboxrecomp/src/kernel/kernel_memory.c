@@ -11,6 +11,9 @@
 
 #include "kernel.h"
 #include "xbox_memory_layout.h"
+#if !defined(_WIN32)
+#include <unistd.h>   /* sysconf */
+#endif
 #if defined(_WIN32)
 /* _aligned_malloc/_aligned_free; POSIX gets them from win32_compat.h */
 #include <malloc.h>
@@ -205,10 +208,47 @@ ULONG __stdcall xbox_MmQueryAddressProtect(PVOID VirtualAddress)
     return PAGE_NOACCESS;
 }
 
+/* A protection change the title asked for, on a host whose pages are larger
+ * than the console's 4 KB (16 KB on Apple silicon).
+ *
+ * mprotect works in host pages: a 4 KB request that is not 16 KB aligned
+ * fails (where Linux's 4 KB pages take it), and an aligned one rounds up and
+ * changes three neighbouring pages the title never named. So a protection
+ * that allows writing covers every host page the range touches (more access
+ * than asked for, which nothing breaks on), and a stricter one only the host
+ * pages it covers whole -- never memory outside the range. Requests that are
+ * not even 4 KB aligned go through unchanged, failing as they do on Linux. */
+BOOL xbox_GuestVirtualProtect(LPVOID address, SIZE_T size, DWORD prot, PDWORD old)
+{
+#if !defined(_WIN32)
+#ifndef PAGE_EXECUTE_WRITECOPY
+#define PAGE_EXECUTE_WRITECOPY 0x80u
+#endif
+    static uintptr_t hp;
+    uintptr_t a = (uintptr_t)address, b = a + size, lo, hi;
+    int writable = (prot & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE
+                            | PAGE_EXECUTE_WRITECOPY)) != 0;
+    if (!hp) {
+        long v = sysconf(_SC_PAGESIZE);
+        hp = v > 0 ? (uintptr_t)v : 4096;
+    }
+    if (hp > 4096 && size && !(a & 4095) && !(size & 4095)
+            && ((a & (hp - 1)) || (size & (hp - 1)))) {
+        lo = writable ? (a & ~(hp - 1)) : ((a + hp - 1) & ~(hp - 1));
+        hi = writable ? ((b + hp - 1) & ~(hp - 1)) : (b & ~(hp - 1));
+        if (old) *old = PAGE_READWRITE;
+        if (hi <= lo)
+            return TRUE;                /* no whole host page to make stricter */
+        return VirtualProtect((LPVOID)lo, hi - lo, prot, NULL);
+    }
+#endif
+    return VirtualProtect(address, size, prot, old);
+}
+
 VOID __stdcall xbox_MmSetAddressProtect(PVOID BaseAddress, ULONG NumberOfBytes, ULONG NewProtect)
 {
     DWORD old_protect;
-    VirtualProtect(BaseAddress, NumberOfBytes, xbox_protect_to_win32(NewProtect), &old_protect);
+    xbox_GuestVirtualProtect(BaseAddress, NumberOfBytes, xbox_protect_to_win32(NewProtect), &old_protect);
     XBOX_TRACE(XBOX_LOG_MEM, "MmSetAddressProtect(%p, %u, 0x%X)", BaseAddress, NumberOfBytes, NewProtect);
 }
 
