@@ -87,11 +87,11 @@ cross-build and more of the runtime switches.
 
 ## Building (macOS, Apple silicon)
 
-A native arm64 build: no Rosetta, no emulator. The host side is verified on
-an M1 Max without the game (launcher, game window, Vulkan through MoltenVK,
-trapped device registers, lifted code against reference C). A run with the
-game itself is still to come. Details and the Mac specifics are in
-[`rsc2/RUNNING.md`](rsc2/RUNNING.md#macos-apple-silicon).
+A native arm64 build: no Rosetta, no emulator. Verified on an M1 Max with
+the game: boot, intro movies, profiles, menus, career, stage loading and a
+race, at a steady 60 fps through Vulkan on MoltenVK, with sound; the
+launcher and the game window open as on Linux. Details and the Mac
+specifics are in [`rsc2/RUNNING.md`](rsc2/RUNNING.md#macos-apple-silicon).
 
 ```sh
 brew install cmake ninja python@3.13 sdl2 molten-vk vulkan-loader \
@@ -104,6 +104,7 @@ cmake -S rsc2 -B rsc2/build -G Ninja -DCMAKE_BUILD_TYPE=Release
 ninja -C rsc2/build
 ln -s ../../RalliSport2 rsc2/build/game
 rsc2/run.sh
+rsc2/tools/macos/make_app.sh      # optional: a double-clickable app in /Applications
 ```
 
 Every region's disc should do: redump.org lists one image for Europe, Japan

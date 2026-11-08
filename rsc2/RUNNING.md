@@ -282,6 +282,15 @@ in the README. What differs from Linux, and why:
   no LOD bias, so the title's bias is dropped.
 - Settings stay in `~/.config/rsc2`, the shader cache in
   `~/.cache/xboxrecomp`. `kill -QUIT <pid>` still dumps every thread.
+- `rsc2/tools/macos/make_app.sh [dir]` makes a double-clickable
+  `RalliSport Challenge 2.app` (default `/Applications`) that starts this
+  build, launcher first; a run's output goes to `~/Library/Logs/rsc2.log`.
+
+Checked on an M1 Max (macOS 27, MoltenVK 1.4.2) with the game, headless:
+boot, intro movies, profile creation, menus, career, stage loading and a
+race at 60 fps, and the audio mix (`RECOMP_AUDIO_WAV`). The lifted code
+needs no Mac-specific changes; `rsc2/regen.sh` and the build are the same
+as on Linux.
 
 Without the game:
 
