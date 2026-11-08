@@ -32,6 +32,10 @@
 #include <limits.h>
 #include <signal.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <libproc.h>          /* proc_listallpids, proc_name: is Steam running */
+#include <mach-o/dyld.h>      /* _NSGetExecutablePath */
+#endif
 #define PATHSEP '/'
 #endif
 
@@ -63,8 +67,11 @@ static int steam_root(char *out, size_t n)
     return file_exists(out);
 #else
     /* ~/.steam/steam is the link Steam itself keeps; then the usual homes
-     * of a native and a Flatpak install. */
+     * of a native and a Flatpak install; on macOS, Application Support. */
     static const char *const cand[] = {
+#if defined(__APPLE__)
+        "/Library/Application Support/Steam",
+#endif
         "/.steam/steam", "/.local/share/Steam",
         "/.var/app/com.valvesoftware.Steam/.local/share/Steam",
     };
@@ -100,6 +107,17 @@ static int steam_running(void)
         CloseHandle(h);
         return alive;
     }
+#elif defined(__APPLE__)
+    /* No /proc: the process list, and the Mac client's name. */
+    int pids[4096], n, i;
+    n = proc_listallpids(pids, sizeof pids);
+    for (i = 0; i < n; i++) {
+        char name[64] = "";
+        if (pids[i] > 0 && proc_name(pids[i], name, sizeof name) > 0
+                && strcmp(name, "steam_osx") == 0)
+            return 1;
+    }
+    return 0;
 #else
     /* Steam writes its pid here and leaves the file behind when it quits,
      * so the pid has to be alive and still be Steam. */
@@ -140,6 +158,13 @@ static int game_exe(char *exe, size_t n, char *dir, size_t dn)
     DWORD k = GetModuleFileNameA(NULL, self, sizeof self);
     if (!k || k >= sizeof self)
         return 0;
+#elif defined(__APPLE__)
+    {
+        char raw[4096];
+        uint32_t sz = sizeof raw;
+        if (_NSGetExecutablePath(raw, &sz) != 0 || !realpath(raw, self))
+            return 0;
+    }
 #else
     ssize_t k = readlink("/proc/self/exe", self, sizeof self - 1);
     if (k <= 0)

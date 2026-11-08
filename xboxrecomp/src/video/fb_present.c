@@ -1103,6 +1103,9 @@ static void *host_game_thread(void *unused)
     (void)unused;
     pthread_setname_np("game");
     rc = s_host_game_fn(s_host_game_arg);
+    /* Where the game ran on the main thread, returning ended the process;
+     * here the window loop on the main thread has to be told. */
+    __atomic_store_n(&s_fb_running, 0, __ATOMIC_RELEASE);
     pthread_mutex_lock(&s_host_mu);
     s_host_game_rc = rc;
     s_host_game_done = 1;
